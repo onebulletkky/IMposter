@@ -1,0 +1,51 @@
+name: imposter
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-imposter}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-imposter_dev}
+      POSTGRES_DB: postgres
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+      - ./infra/postgres/01-databases.sql:/docker-entrypoint-initdb.d/01-databases.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  words-api:
+    build:
+      context: .
+      dockerfile: src/Imposter.Words.Api/Dockerfile
+    environment:
+      ConnectionStrings__Words: Host=postgres;Database=imposter_words;Username=${POSTGRES_USER:-imposter};Password=${POSTGRES_PASSWORD:-imposter_dev}
+      Services__ApiKey: ${SERVICE_API_KEY:-dev-imposter-service-key-local-only}
+      SeedDemoWords: ${SEED_DEMO_WORDS:-true}
+    depends_on:
+      postgres:
+        condition: service_healthy
+  game-api:
+    build:
+      context: .
+      dockerfile: src/Imposter.Game.Api/Dockerfile
+    environment:
+      ConnectionStrings__Games: Host=postgres;Database=imposter_games;Username=${POSTGRES_USER:-imposter};Password=${POSTGRES_PASSWORD:-imposter_dev}
+      Services__WordsUrl: http://words-api:8080
+      Services__ApiKey: ${SERVICE_API_KEY:-dev-imposter-service-key-local-only}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      words-api:
+        condition: service_started
+  web:
+    build:
+      context: ./src/imposter-web
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+    depends_on:
+      - game-api
+volumes:
+  postgres-data:

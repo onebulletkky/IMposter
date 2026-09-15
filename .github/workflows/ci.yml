@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "true"
+      TEST_GAMES_CONNECTION: "Host=127.0.0.1;Port=5432;Database=imposter_test;Username=imposter;Password=imposter_dev"
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: imposter_test
+          POSTGRES_USER: imposter
+          POSTGRES_PASSWORD: imposter_dev
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U imposter -d imposter_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: src/imposter-web/package-lock.json
+
+      - name: Restore backend dependencies
+        run: dotnet restore Imposter.slnx
+
+      - name: Build backend
+        run: dotnet build Imposter.slnx --configuration Release --no-restore
+
+      - name: Test backend and PostgreSQL integration
+        run: dotnet test Imposter.slnx --configuration Release --no-build --no-restore
+
+      - name: Restore frontend dependencies
+        working-directory: src/imposter-web
+        run: npm ci
+
+      - name: Test frontend
+        working-directory: src/imposter-web
+        run: npm test
+
+      - name: Build frontend
+        working-directory: src/imposter-web
+        run: npm run build

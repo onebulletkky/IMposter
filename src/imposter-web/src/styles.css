@@ -1,0 +1,20 @@
+:root { font-synthesis: none; text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; color-scheme: dark; }
+body { margin: 0; min-width: 320px; }
+button, input { font: inherit; }
+::selection { background: #7362c5; color: #fff; }
+.site-shell { min-height: 100vh; background: radial-gradient(ellipse at 68% 5%, #29223f66 0, transparent 45%), #10111c; }
+.eyebrow { font-size: 11px !important; font-weight: 750 !important; letter-spacing: 0.18em !important; text-transform: uppercase; }
+.hero-art { position: relative; height: 185px; margin: 12px auto 18px; width: 260px; }
+.secret-card { position: absolute; width: 116px; height: 150px; border: 1px solid #646081; border-radius: 20px; box-shadow: 0 16px 45px #0005; display: grid; place-items: center; background: linear-gradient(145deg, #393252, #242338); }
+.secret-card.left { left: 10px; top: 17px; transform: rotate(-16deg); }
+.secret-card.right { right: 10px; top: 17px; transform: rotate(16deg); }
+.secret-card.center { left: 72px; top: 0; z-index: 1; background: linear-gradient(140deg, #aa9aff, #7662c6); border-color: #cebdff; }
+.mask { position: relative; width: 67px; height: 41px; background: #241d43; border-radius: 14px 14px 24px 24px; transform: rotate(-5deg); }
+.mask::before, .mask::after { content: ''; position: absolute; top: 13px; width: 15px; height: 7px; border-radius: 100%; background: #d6caff; }
+.mask::before { left: 11px; transform: rotate(12deg); }
+.mask::after { right: 11px; transform: rotate(-12deg); }
+.dot-grid { width: 49px; height: 65px; background: radial-gradient(circle, #c5b7ed 2.5px, transparent 3px); background-size: 15px 15px; opacity: 0.5; }
+.lobby-code { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace !important; letter-spacing: 0.22em !important; }
+.secret-word { overflow-wrap: anywhere; }
+.status-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #82e8c1; box-shadow: 0 0 12px #82e8c133; margin-right: 9px; }
+@media (prefers-reduced-motion: no-preference) { .entrance { animation: entrance 0.35s ease-out both; } @keyframes entrance { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } } }
