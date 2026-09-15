@@ -11,8 +11,8 @@ export async function request<T>(path: string, options: RequestInit = {}, sessio
   const response = await fetch(`/api${path}`, {
     ...options,
     signal: options.signal
-      ? AbortSignal.any([options.signal, AbortSignal.timeout(10_000)])
-      : AbortSignal.timeout(10_000),
+      ? AbortSignal.any([options.signal, AbortSignal.timeout(120_000)])
+      : AbortSignal.timeout(120_000),
     headers: {
       Accept: 'application/json',
       ...(options.body ? { 'Content-Type': 'application/json' } : {}),

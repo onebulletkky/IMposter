@@ -181,6 +181,137 @@ public sealed class GameApiTests(GameApiFixture fixture) : IClassFixture<GameApi
         Assert.All(finished.Players, player => Assert.NotNull(player.IsImpostor));
     }
 
+    [Fact]
+    public async Task CachedReadsAuthenticateEachPlayerAndLocalChangesInvalidateTheSnapshot()
+    {
+        var sessions = await Lobby();
+        using var warm = await Send(HttpMethod.Get, sessions[0].Code, sessions[0].Token);
+        Assert.Equal(HttpStatusCode.OK, warm.StatusCode);
+        using var forged = await Send(HttpMethod.Get, sessions[0].Code, new string('A', 64));
+        Assert.Equal(HttpStatusCode.Unauthorized, forged.StatusCode);
+        using var guest = await Send(HttpMethod.Get, sessions[0].Code, sessions[1].Token);
+        Assert.Equal(sessions[1].PlayerId, (await Success<GameView>(guest)).Self.Id);
+        using var settings = await Send(HttpMethod.Put, sessions[0].Code, sessions[0].Token,
+            "/settings", new GameSettings { RoundCount = 5 });
+        Assert.Equal(HttpStatusCode.OK, settings.StatusCode);
+        using var changed = await Send(HttpMethod.Get, sessions[0].Code, sessions[1].Token);
+        Assert.Equal(5, (await Success<GameView>(changed)).Settings.RoundCount);
+        using var leave = await Send(HttpMethod.Delete, sessions[0].Code, sessions[1].Token, "/players/me");
+        Assert.Equal(HttpStatusCode.NoContent, leave.StatusCode);
+        using var removed = await Send(HttpMethod.Get, sessions[0].Code, sessions[1].Token);
+        Assert.Equal(HttpStatusCode.Unauthorized, removed.StatusCode);
+    }
+
+    [Fact]
+    public async Task CacheRefreshesChangesFromOtherInstancesWithinTwoSeconds()
+    {
+        var sessions = await Lobby();
+        using var warm = await Send(HttpMethod.Get, sessions[0].Code, sessions[0].Token);
+        var original = await Success<GameView>(warm);
+        await using var otherFactory = fixture.NewFactory();
+        using var otherClient = otherFactory.CreateClient();
+        using var settings = await Send(HttpMethod.Put, sessions[0].Code, sessions[0].Token,
+            "/settings", new GameSettings { RoundCount = 5 }, otherClient);
+        Assert.Equal(HttpStatusCode.OK, settings.StatusCode);
+        using var cached = await Send(HttpMethod.Get, sessions[0].Code, sessions[0].Token);
+        Assert.Equal(original.Version, (await Success<GameView>(cached)).Version);
+        fixture.Clock.Advance(RoomReadCache.Lifetime);
+        using var refreshed = await Send(HttpMethod.Get, sessions[0].Code, sessions[0].Token);
+        Assert.Equal(5, (await Success<GameView>(refreshed)).Settings.RoundCount);
+    }
+
+    [Fact]
+    public async Task CachedTurnIsReconciledAtItsDeadlineEvenBeforeCacheLifetimeEnds()
+    {
+        var sessions = await Lobby();
+        var started = await Start(sessions[0]);
+        fixture.Clock.Advance(TimeSpan.FromSeconds(29));
+        using var warm = await Send(HttpMethod.Get, sessions[0].Code, sessions[0].Token);
+        Assert.Equal(started.TurnNumber, (await Success<GameView>(warm)).TurnNumber);
+        fixture.Clock.Advance(TimeSpan.FromSeconds(1));
+        using var expired = await Send(HttpMethod.Get, sessions[0].Code, sessions[1].Token);
+        var advanced = await Success<GameView>(expired);
+        Assert.Equal(started.TurnNumber + 1, advanced.TurnNumber);
+        Assert.Equal(started.TurnEndsAt!.Value.AddSeconds(30), advanced.TurnEndsAt);
+    }
+
+    [Fact]
+    public async Task SleepingGameCatchesUpOnceAcrossFreshInstancesWithoutExtendingDeadlines()
+    {
+        var sessions = await Lobby();
+        var started = await Start(sessions[0]);
+        fixture.Clock.Advance(TimeSpan.FromSeconds(65));
+        using (var stored = JsonDocument.Parse(await fixture.StoredState(sessions[0].Code)))
+            Assert.Equal(1, stored.RootElement.GetProperty("turnNumber").GetInt32());
+
+        await using var firstFactory = fixture.NewFactory();
+        await using var secondFactory = fixture.NewFactory();
+        using var firstClient = firstFactory.CreateClient();
+        using var secondClient = secondFactory.CreateClient();
+        var responses = await Task.WhenAll(
+            Send(HttpMethod.Get, sessions[0].Code, sessions[0].Token, client: firstClient),
+            Send(HttpMethod.Get, sessions[0].Code, sessions[1].Token, client: secondClient));
+        foreach (var response in responses)
+        {
+            using (response)
+            {
+                var view = await Success<GameView>(response);
+                Assert.Equal(3, view.TurnNumber);
+                Assert.Equal(started.TurnEndsAt!.Value.AddSeconds(60), view.TurnEndsAt);
+                Assert.Equal(started.Version + 1, view.Version);
+            }
+        }
+        fixture.Clock.Advance(TimeSpan.FromSeconds(30));
+        using var voting = await Send(HttpMethod.Get, sessions[0].Code, sessions[0].Token, client: firstClient);
+        var finishedTurns = await Success<GameView>(voting);
+        Assert.Equal(GamePhase.Voting, finishedTurns.Phase);
+        Assert.Null(finishedTurns.TurnEndsAt);
+    }
+
+    [Fact]
+    public async Task ExpiredLobbyCannotWakeAndIsRemovedWhenAnotherLobbyIsCreated()
+    {
+        var session = await Create("Expired");
+        await fixture.ExpireRoom(session.Code);
+        using var missing = await Send(HttpMethod.Get, session.Code, session.Token);
+        Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
+        await Create("New host");
+        Assert.Null(await fixture.StoredState(session.Code));
+    }
+
+    [Fact]
+    public async Task WakingWordServiceDoesNotUseUpTheFirstPlayersTurn()
+    {
+        var sessions = await Lobby();
+        var before = fixture.Clock.GetUtcNow();
+        await using var coldFactory = fixture.NewFactory(() => fixture.Clock.Advance(TimeSpan.FromSeconds(60)));
+        using var coldClient = coldFactory.CreateClient();
+        using var response = await Send(HttpMethod.Post, sessions[0].Code, sessions[0].Token, "/start", client: coldClient);
+        var started = await Success<GameView>(response);
+        Assert.Equal(before.AddSeconds(60), started.ServerTime);
+        Assert.Equal(started.ServerTime.AddSeconds(started.Settings.TurnSeconds), started.TurnEndsAt);
+        Assert.Equal(1, started.TurnNumber);
+    }
+    [Fact]
+    public async Task CachedPollsAndIdleApplicationDoNotQueryPostgres()
+    {
+        var sessions = await Lobby();
+        await using var isolatedFactory = fixture.NewFactory();
+        using var isolatedClient = isolatedFactory.CreateClient();
+        using var warm = await Send(HttpMethod.Get, sessions[0].Code, sessions[0].Token, client: isolatedClient);
+        Assert.Equal(HttpStatusCode.OK, warm.StatusCode);
+        var lastQuery = await fixture.LastDatabaseActivity(isolatedFactory.ApplicationName);
+        var polls = await Task.WhenAll(Enumerable.Range(0, 12).Select(i =>
+            Send(HttpMethod.Get, sessions[0].Code, sessions[i % 3].Token, client: isolatedClient)));
+        foreach (var response in polls)
+        {
+            using (response) Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        }
+        Assert.Equal(lastQuery, await fixture.LastDatabaseActivity(isolatedFactory.ApplicationName));
+        // A saved room with nobody requesting updates does not cause timer scans.
+        await Task.Delay(TimeSpan.FromMilliseconds(2200));
+        Assert.Equal(lastQuery, await fixture.LastDatabaseActivity(isolatedFactory.ApplicationName));
+    }
     private async Task<SessionResponse> Create(string nickname)
     {
         using var response = await fixture.Client.PostAsJsonAsync("/api/lobbies/", new { nickname });

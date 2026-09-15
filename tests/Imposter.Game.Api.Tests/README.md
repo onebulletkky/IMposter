@@ -9,6 +9,13 @@ $env:TEST_GAMES_CONNECTION = 'Host=localhost;Port=55432;Database=imposter_games;
 dotnet test tests/Imposter.Game.Api.Tests/Imposter.Game.Api.Tests.csproj
 ```
 
-The tests create a unique `game_api_test_` schema and remove only that schema when finished. They fail with an explanatory error when `TEST_GAMES_CONNECTION` is missing or PostgreSQL is unavailable. No integration tests silently skip.
+The tests create unique `game_api_test_` and `word_cache_test_` schemas and remove only those schemas when finished. They fail with an explanatory error when `TEST_GAMES_CONNECTION` is missing or PostgreSQL is unavailable. No integration tests silently skip.
 
 The suite checks session authentication, private response data, database persistence across API instances, host and turn permissions, code normalization, and simultaneous confirmations and votes. Run the domain test project separately when PostgreSQL is not available.
+
+Sleep and cache tests cover deadline catch-up across fresh API instances,
+expired lobby cleanup, delayed word-service startup, cached authentication,
+local invalidation, bounded staleness between instances, and actual PostgreSQL
+activity during cached polls and idle periods. Catalog tests use the real word
+repository and PostgreSQL, including a sequence that counts concurrent catalog
+loads. No Azure account is required for these checks.

@@ -12,9 +12,10 @@ public sealed class ApiException(int statusCode, string message) : Exception(mes
     public int StatusCode { get; } = statusCode;
 }
 
-public sealed class GameStore(NpgsqlDataSource dataSource, TimeProvider clock)
+public sealed class GameStore(NpgsqlDataSource dataSource, TimeProvider clock, RoomReadCache cache) : IDisposable
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
+    private readonly SemaphoreSlim[] readGates = Enumerable.Range(0, 32).Select(_ => new SemaphoreSlim(1, 1)).ToArray();
 
     public async Task Initialize(CancellationToken ct)
     {
@@ -33,34 +34,65 @@ public sealed class GameStore(NpgsqlDataSource dataSource, TimeProvider clock)
 
     public async Task Insert(GameRoom room, CancellationToken ct)
     {
+        // Reclaim old codes on activity, without polling while everyone is away.
+        await using (var purge = dataSource.CreateCommand("DELETE FROM lobbies WHERE expires_at <= now()"))
+            await purge.ExecuteNonQueryAsync(ct);
         await using var cmd = dataSource.CreateCommand("INSERT INTO lobbies (code, state) VALUES (@code, @state)");
         cmd.Parameters.AddWithValue("code", room.Code);
         cmd.Parameters.AddWithValue("state", NpgsqlDbType.Jsonb, JsonSerializer.Serialize(room, Json));
         await cmd.ExecuteNonQueryAsync(ct);
+        cache.Invalidate();
     }
 
-    // The row lock serializes mutations across simultaneous requests and API instances.
-    public async Task<T> WithRoom<T>(string code, Func<GameRoom, DateTimeOffset, Task<T>> action, CancellationToken ct)
+    // Mutations always use the row lock, including catch-up after a cold start.
+    public async Task<T> WithRoom<T>(string code, Func<GameRoom, DateTimeOffset, Task<T>> action, CancellationToken ct, bool cacheRead = false)
     {
         code = NormalizeCode(code);
+        if (!cacheRead) return await WithRoomCore(code, action, ct, false);
+        // Coalesce simultaneous polling cache misses without an unbounded lock map.
+        var gate = readGates[(uint)StringComparer.Ordinal.GetHashCode(code) % (uint)readGates.Length];
+        await gate.WaitAsync(ct);
+        try { return await WithRoomCore(code, action, ct, true); }
+        finally { gate.Release(); }
+    }
+
+    private async Task<T> WithRoomCore<T>(string code, Func<GameRoom, DateTimeOffset, Task<T>> action, CancellationToken ct, bool cacheRead)
+    {
+        code = NormalizeCode(code);
+        var now = clock.GetUtcNow();
+        if (cacheRead && cache.Get(code, now) is { } cachedJson)
+        {
+            ct.ThrowIfCancellationRequested();
+            var cachedRoom = JsonSerializer.Deserialize<GameRoom>(cachedJson, Json)
+                ?? throw new InvalidOperationException("Invalid cached lobby.");
+            return await action(cachedRoom, now);
+        }
+        var generation = cache.Generation;
         await using var conn = await dataSource.OpenConnectionAsync(ct);
         await using var transaction = await conn.BeginTransactionAsync(ct);
-        await using var select = new NpgsqlCommand("SELECT state::text FROM lobbies WHERE code = @code AND expires_at > now() FOR UPDATE", conn, transaction);
+        await using var select = new NpgsqlCommand("SELECT state::text, expires_at FROM lobbies WHERE code = @code AND expires_at > now() FOR UPDATE", conn, transaction);
         select.Parameters.AddWithValue("code", code);
-        var json = await select.ExecuteScalarAsync(ct) as string
-            ?? throw new ApiException(404, "Lobby not found. Check the code or create a new lobby.");
+        string json;
+        DateTimeOffset expiresAt;
+        await using (var reader = await select.ExecuteReaderAsync(ct))
+        {
+            if (!await reader.ReadAsync(ct))
+                throw new ApiException(404, "Lobby not found. Check the code or create a new lobby.");
+            json = reader.GetString(0);
+            expiresAt = reader.GetFieldValue<DateTimeOffset>(1);
+        }
         var room = JsonSerializer.Deserialize<GameRoom>(json, Json) ?? throw new InvalidOperationException("Invalid stored lobby.");
-        var now = clock.GetUtcNow();
+        now = clock.GetUtcNow();
         var previousVersion = room.Version;
         var result = await action(room, now);
-        // Polling an unchanged room does not rewrite the JSON document. Refresh its
-        // idle expiry at most every five minutes instead of on every request.
+        // Refresh idle expiry at most every five minutes, without rewriting JSON.
         if (room.Version == previousVersion && room.Players.Count > 0)
         {
             await using var touch = new NpgsqlCommand("UPDATE lobbies SET expires_at = now() + interval '24 hours' WHERE code = @code AND expires_at < now() + interval '23 hours 55 minutes'", conn, transaction);
             touch.Parameters.AddWithValue("code", code);
             await touch.ExecuteNonQueryAsync(ct);
             await transaction.CommitAsync(ct);
+            if (cacheRead) cache.Store(room, json, now, expiresAt, generation);
             return result;
         }
         await using var save = new NpgsqlCommand(room.Players.Count == 0
@@ -71,27 +103,16 @@ public sealed class GameStore(NpgsqlDataSource dataSource, TimeProvider clock)
             save.Parameters.AddWithValue("state", NpgsqlDbType.Jsonb, JsonSerializer.Serialize(room, Json));
         await save.ExecuteNonQueryAsync(ct);
         await transaction.CommitAsync(ct);
+        cache.Invalidate();
         return result;
     }
 
     public Task<T> WithRoom<T>(string code, Func<GameRoom, DateTimeOffset, T> action, CancellationToken ct)
-        => WithRoom(code, (room, now) => Task.FromResult(action(room, now)), ct);
+        => WithRoom<T>(code, (room, now) => Task.FromResult(action(room, now)), ct, cacheRead: false);
 
-    public async Task<IReadOnlyList<string>> DueRooms(CancellationToken ct)
+    public void Dispose()
     {
-        // Expired rooms are purged regardless of their phase.
-        await using (var purge = dataSource.CreateCommand("DELETE FROM lobbies WHERE expires_at < now()"))
-            await purge.ExecuteNonQueryAsync(ct);
-        await using var cmd = dataSource.CreateCommand("""
-            SELECT code FROM lobbies
-            WHERE state ->> 'turnEndsAt' IS NOT NULL
-              AND (state ->> 'turnEndsAt')::timestamptz <= now()
-            LIMIT 100
-            """);
-        await using var reader = await cmd.ExecuteReaderAsync(ct);
-        var codes = new List<string>();
-        while (await reader.ReadAsync(ct)) codes.Add(reader.GetString(0));
-        return codes;
+        foreach (var gate in readGates) gate.Dispose();
     }
 
     public static string NormalizeCode(string? code)

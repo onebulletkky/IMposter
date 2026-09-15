@@ -39,7 +39,7 @@ public sealed class GameApiFixture : IAsyncLifetime
         response.EnsureSuccessStatusCode();
     }
 
-    public GameApiFactory NewFactory() => new(connection, Clock);
+    public GameApiFactory NewFactory(Action? onWordRequest = null) => new(connection, Clock, onWordRequest);
 
     public async Task<string> StoredState(string code)
     {
@@ -50,6 +50,22 @@ public sealed class GameApiFixture : IAsyncLifetime
         return (string)(await command.ExecuteScalarAsync())!;
     }
 
+    public async Task<DateTimeOffset> LastDatabaseActivity(string applicationName)
+    {
+        await using var database = new NpgsqlConnection(connection);
+        await database.OpenAsync();
+        await using var command = new NpgsqlCommand("SELECT max(query_start) FROM pg_stat_activity WHERE application_name = @name", database);
+        command.Parameters.AddWithValue("name", applicationName);
+        return new DateTimeOffset((DateTime)(await command.ExecuteScalarAsync())!);
+    }
+    public async Task ExpireRoom(string code)
+    {
+        await using var database = new NpgsqlConnection(connection);
+        await database.OpenAsync();
+        await using var command = new NpgsqlCommand("UPDATE lobbies SET expires_at = now() - interval '1 minute' WHERE code = @code", database);
+        command.Parameters.AddWithValue("code", code);
+        await command.ExecuteNonQueryAsync();
+    }
     public async Task DisposeAsync()
     {
         Client?.Dispose();
@@ -62,14 +78,16 @@ public sealed class GameApiFixture : IAsyncLifetime
     }
 }
 
-public sealed class GameApiFactory(string connection, TestClock clock) : WebApplicationFactory<Program>
+public sealed class GameApiFactory(string connection, TestClock clock, Action? onWordRequest = null) : WebApplicationFactory<Program>
 {
+    public string ApplicationName { get; } = "sleep-test-" + Guid.NewGuid().ToString("N");
+
     protected override IHost CreateHost(IHostBuilder builder)
     {
         // Minimal-host startup reads these values before web-host callbacks run.
         builder.ConfigureHostConfiguration(configuration => configuration.AddInMemoryCollection(new Dictionary<string, string?>
         {
-            ["ConnectionStrings:Games"] = connection,
+            ["ConnectionStrings:Games"] = new NpgsqlConnectionStringBuilder(connection) { ApplicationName = ApplicationName }.ConnectionString,
             ["Services:ApiKey"] = "integration-test-service-key",
             ["Services:WordsUrl"] = "http://words.test"
         }));
@@ -83,17 +101,17 @@ public sealed class GameApiFactory(string connection, TestClock clock) : WebAppl
         {
             services.RemoveAll<TimeProvider>();
             services.AddSingleton<TimeProvider>(clock);
-            services.AddHttpClient<WordClient>().ConfigurePrimaryHttpMessageHandler(() => new TestWordsHandler());
-            foreach (var worker in services.Where(service => service.ServiceType == typeof(IHostedService)
-                         && service.ImplementationType == typeof(TurnWorker)).ToArray())
-                services.Remove(worker);
+            services.AddHttpClient<WordClient>().ConfigurePrimaryHttpMessageHandler(() => new TestWordsHandler(onWordRequest));
         });
     }
 
-    private sealed class TestWordsHandler : HttpMessageHandler
+    private sealed class TestWordsHandler(Action? onRequest) : HttpMessageHandler
     {
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
-            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(new WordPair("Volcano", "Mountain")) });
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            onRequest?.Invoke();
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(new WordPair("Volcano", "Mountain")) });
+        }
     }
 }
 

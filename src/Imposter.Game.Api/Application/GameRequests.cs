@@ -46,7 +46,7 @@ public sealed class JoinLobbyHandler(GameStore store) : IRequestHandler<JoinLobb
         }, ct);
 }
 
-public sealed class RoomRequestHandler(GameStore store, WordClient words) : IRequestHandler<RoomRequest, GameView?>
+public sealed class RoomRequestHandler(GameStore store, WordClient words, TimeProvider clock) : IRequestHandler<RoomRequest, GameView?>
 {
     public Task<GameView?> Handle(RoomRequest request, CancellationToken ct)
         => store.WithRoom<GameView?>(request.Code, async (room, now) =>
@@ -62,7 +62,10 @@ public sealed class RoomRequestHandler(GameStore store, WordClient words) : IReq
                 case RoomAction.Start:
                     if (room.HostId != playerId || room.Phase != GamePhase.Lobby)
                         throw new ApiException(409, "Only the host can start a waiting lobby.");
-                    GameRules.Start(room, playerId, await words.Random(ct), now);
+                    var pair = await words.Random(ct);
+                    // A sleeping catalog must not consume the first player's turn.
+                    now = clock.GetUtcNow();
+                    GameRules.Start(room, playerId, pair, now);
                     break;
                 case RoomAction.ConfirmTurn: GameRules.ConfirmTurn(room, playerId, request.TurnNumber, now); break;
                 case RoomAction.Vote: GameRules.Vote(room, playerId, request.TargetId); break;
@@ -73,5 +76,5 @@ public sealed class RoomRequestHandler(GameStore store, WordClient words) : IReq
             }
             if (request.Action != RoomAction.Read) room.Version++;
             return request.Action == RoomAction.Leave ? null : GameRules.ToView(room, playerId, now);
-        }, ct);
+        }, ct, cacheRead: request.Action == RoomAction.Read);
 }

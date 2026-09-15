@@ -16,14 +16,15 @@ if (string.IsNullOrWhiteSpace(connectionString)) throw new InvalidOperationExcep
 var serviceKey = builder.Configuration["Services:ApiKey"];
 if (string.IsNullOrWhiteSpace(serviceKey)) throw new InvalidOperationException("Services:ApiKey is required.");
 builder.Services.AddSingleton(NpgsqlDataSource.Create(connectionString));
+builder.Services.AddSingleton<RoomReadCache>();
 builder.Services.AddSingleton<GameStore>();
 builder.Services.AddHttpClient<WordClient>(client =>
 {
     client.BaseAddress = new Uri(builder.Configuration["Services:WordsUrl"] ?? "http://localhost:5081");
     client.DefaultRequestHeaders.Add("X-Service-Key", serviceKey);
-    client.Timeout = TimeSpan.FromSeconds(5);
+    client.Timeout = TimeSpan.FromSeconds(90);
 });
-builder.Services.AddHostedService<TurnWorker>();
+
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;

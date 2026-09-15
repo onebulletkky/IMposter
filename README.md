@@ -72,7 +72,7 @@ Vite proxies `/api` to the game service on port 5080. The word service listens o
 ```text
 Browser: React + Material UI
     |
-    | HTTP /api, private authenticated polling every second
+    | HTTP /api, private authenticated polling while active
     v
 Game API: .NET 10 + MediatR
     |                       |
@@ -91,16 +91,20 @@ imposter_games          Words API: .NET 10 + MediatR
 - MediatR dispatches commands and queries **inside a process**. HTTP is the transport between services. No message broker or Redis is required.
 - MediatR is pinned to **12.5.0**, whose source has the Apache 2.0 license. Review the license and upgrade implications before changing its major version. [MediatR source](https://github.com/LuckyPennySoftware/MediatR/tree/v12.5.0)
 
-The game database stores each lobby as a JSON document. Every change takes a PostgreSQL row lock so simultaneous actions, including actions routed to different API instances, cannot overwrite each other. Unchanged polls avoid rewriting that document. A background worker advances expired turns even when no player has a page open. Deadlines survive a restart and catch up to elapsed time.
+The game database stores each lobby as a JSON document. Every change takes a PostgreSQL row lock so simultaneous actions, including actions routed to different API instances, cannot overwrite each other. Unchanged polls avoid rewriting that document. Turn deadlines are persisted timestamps: each authorized request catches up elapsed turns before returning the current game. If everybody disconnects, the API can sleep; the next request advances to the same point in time. No timer worker or recurring database scan runs between requests. Expired lobbies are inaccessible immediately and stored rows are removed when another lobby is created.
+
+Each Game API instance caches up to 256 lobby snapshots for two seconds. Authentication and private player views are checked separately for each request. Local writes invalidate the cache, elapsed turn deadlines bypass it, and simultaneous cache misses share one database read. Changes through another API instance can take up to two seconds to appear in a cached poll. Words loads its catalog on demand and caches it for five minutes, selecting a random pair for each game. Empty catalogs are not cached. Both caches use process memory; PostgreSQL remains authoritative and no Redis service is needed.
 
 Player tokens are random, returned only when joining, stored in session storage, and sent as bearer tokens. Only their SHA-256 hashes are persisted. Private responses contain the current player's role and word, while other roles and the common word remain hidden until the game finishes. The internal word endpoint requires a service key and is not proxied to browsers.
+
+The language selector switches the interface between English and Italian and remembers the choice in this browser. Word and hint content remains as defined in the catalog.
 
 ## Game rules in this starter
 
 1. A nickname of 1-24 characters is required for both create and join. Nicknames must be unique within a lobby. Codes contain five uppercase letters or digits; joining is case-insensitive.
 2. Games support 3-16 players. The host configures 1-5 guaranteed impostors, a 0-100 percent chance of adding **one extra impostor**, 1-10 rounds, and 10-180 seconds per turn. The settings must leave at least one crew member even if the extra impostor is selected.
 3. Impostors see the hint; crew members see the common word. All impostors are on one team. The server selects roles randomly when the host starts.
-4. A round visits every player once in lobby join order. The timer applies to each player's turn. The current player confirms their spoken clue, or the server advances when time runs out.
+4. A round visits every player once in lobby join order. The timer applies to each player's turn. The current player confirms their spoken clue, or the next authorized request advances expired turns. Active polling makes this automatic during play; disconnecting does not pause the clock.
 5. After all rounds, every player casts one final, private vote for another player. Self-votes and changing votes are disabled. Totals appear only after everyone votes.
 6. Impostors must guess the common word correctly to win, regardless of who received the most votes. They share one attempt, or **three shared attempts if the highest vote total is tied**. Any impostor may submit a guess. These resolve the currently unspecified team/vote details and can be changed in `GameRules`.
 7. A correct guess ends the game immediately. Otherwise crew wins when attempts run out. The common word and all roles are revealed only when the game finishes, preserving the challenge during the three-guess tie case. Guesses ignore case and surrounding whitespace and normalize Unicode compatibility characters.
@@ -120,18 +124,19 @@ VALUES ('Volcano', 'Heat')
 ON CONFLICT (word) DO UPDATE SET hint = EXCLUDED.hint;
 ```
 
-The schema and example pack live in `src/Imposter.Words.Api/db`. Words support up to 80 characters, hints up to 160, and both must be nonempty and different. Empty catalogs make the word service readiness endpoint return 503; lobbies remain usable, but games cannot start until valid pairs are added. No AI generation or paid API is used for words.
+The schema and example pack live in `src/Imposter.Words.Api/db`. Words support up to 80 characters, hints up to 160, and both must be nonempty and different. Catalog edits become visible on the next five-minute cache refresh or after restarting the Words API. Empty catalogs make the word service readiness endpoint return 503; lobbies remain usable, but games cannot start until valid pairs are added. No AI generation or paid API is used for words.
 
 ## Project layout
 
 ```text
 src/Imposter.Game.Domain       Game rules and private views
-src/Imposter.Game.Api          Public API, PostgreSQL persistence, timer worker
+src/Imposter.Game.Api          Public API, PostgreSQL persistence, request-driven timers
 src/Imposter.Words.Api         Internal word catalog and SQL schema
 src/imposter-web               React, TypeScript, Material UI, Vite
 tests/Imposter.Game.Domain.Tests
 tests/Imposter.Game.Api.Tests  Real PostgreSQL HTTP integration tests
 infra/postgres                Initial database creation
+infra/azure                   Container Apps sleep configuration
 scripts                       Windows startup and shutdown helpers
 .github/workflows/ci.yml       Builds and tests with PostgreSQL
 ```
@@ -151,6 +156,18 @@ npm run build
 With both services running, `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/Smoke-Test.ps1` plays a complete three-player game through HTTP, including the real word service, tied votes, final reveal, rematch, and lobby cleanup.
 
 API integration tests require PostgreSQL and an explicit `TEST_GAMES_CONNECTION`. They create a separate schema per run and remove only that schema. CI supplies PostgreSQL automatically. Tests cover secret isolation, persisted sessions, host permissions, concurrent turns and votes, timeouts, win conditions, and frontend controls.
+
+## Sleeping between games
+
+The APIs perform no recurring game or catalog queries while idle. Persisted UTC deadlines keep running when everyone disconnects and catch up on the next authorized request. Cached data is loaded only when requested.
+
+Browser polling pauses immediately in hidden or offline tabs. Lobby and results screens also pause after five minutes without pointer or keyboard activity. Returning to the tab, reconnecting, or choosing Resume refreshes the lobby before game controls become available. Visible rounds, voting, and guessing continue polling; close abandoned active game tabs to let the API sleep.
+
+Browser requests allow 120 seconds for a cold start, and Game allows 90 seconds for Words to wake. Check a refreshed lobby before retrying a timed-out action, because the server may already have completed it.
+
+Actual process suspension is configured by the hosting platform. For Azure Container Apps, use Consumption with HTTP ingress and zero minimum replicas for both APIs. Internal HTTP ingress lets a game-start request wake Words. Persisted rooms alone do not keep an API awake, but incoming polls and uptime pings can. See [Azure sleep configuration](infra/azure/README.md) for commands, probes, and verification. No settings have been applied to an Azure account.
+
+Azure Database for PostgreSQL is a separate resource: sleeping containers does not stop its server or storage charges. Local Compose and Windows startup keep processes running, but idle APIs stop querying game and word tables.
 
 ## Current scope
 

@@ -26,7 +26,8 @@ var connectionOptions = new NpgsqlConnectionStringBuilder(connectionString)
 
 builder.Services.AddSingleton(NpgsqlDataSource.Create(connectionOptions.ConnectionString));
 builder.Services.AddSingleton(new ServiceKeyGuard(serviceKey));
-builder.Services.AddScoped<WordRepository>();
+builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddSingleton<WordRepository>();
 builder.Services.AddMediatR(configuration =>
     configuration.RegisterServicesFromAssemblyContaining<GetRandomWordQuery>());
 builder.Services.AddHostedService<DatabaseInitializer>();

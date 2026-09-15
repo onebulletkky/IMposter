@@ -13,5 +13,6 @@
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
     <ProjectReference Include="../../src/Imposter.Game.Api/Imposter.Game.Api.csproj" />
+    <ProjectReference Include="../../src/Imposter.Words.Api/Imposter.Words.Api.csproj" Aliases="WordsApi" />
   </ItemGroup>
 </Project>

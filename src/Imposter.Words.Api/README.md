@@ -43,6 +43,20 @@ development bootstrap.
 MediatR dispatches the query within this process. Communication from the game
 service uses HTTP. Database contents and shared keys are not logged.
 
+## Caching and sleeping
+
+The catalog is loaded only when a game requests a word, then cached in memory for
+five minutes. Concurrent requests share one catalog load; each game still makes
+its own random choice from the cached pairs. An empty catalog is not cached.
+There are no refresh timers or database keepalive queries. Use /health/live for
+recurring platform probes; /health/ready queries PostgreSQL and is intended for
+startup diagnostics or manual checks.
+
+SQL changes become visible on the next request after the five-minute cache
+expires, or immediately after restarting the Words API. A running game keeps
+its original word and hint. Selecting Italian in the browser translates the
+interface; words and hints are authored separately in this shared catalog.
+
 ## Authoring words
 
 Disable `SeedDemoWords` when replacing the demonstration catalog. Run SQL against
