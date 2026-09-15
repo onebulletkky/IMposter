@@ -8,6 +8,60 @@ permissions:
   contents: read
 
 jobs:
+  publish-and-deploy:
+    needs: build-and-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: production-backend
+      cancel-in-progress: false
+    env:
+      REGISTRY_NAME: ${{ vars.ACR_NAME }}
+      REGISTRY_HOST: ${{ vars.ACR_LOGIN_SERVER }}
+      RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build and publish images
+        run: |
+          az acr login --name "$REGISTRY_NAME"
+
+          docker build \
+            -f src/Imposter.Words.Api/Dockerfile \
+            -t "$REGISTRY_HOST/imposter-words:$GITHUB_SHA" .
+          docker push "$REGISTRY_HOST/imposter-words:$GITHUB_SHA"
+
+          docker build \
+            -f src/Imposter.Game.Api/Dockerfile \
+            -t "$REGISTRY_HOST/imposter-game:$GITHUB_SHA" .
+          docker push "$REGISTRY_HOST/imposter-game:$GITHUB_SHA"
+
+      - name: Deploy backend revisions
+        if: vars.DEPLOY_ENABLED == 'true'
+        run: |
+          az extension add --name containerapp --upgrade --yes
+
+          az containerapp update \
+            --resource-group "$RESOURCE_GROUP" \
+            --name imposter-words \
+            --image "$REGISTRY_HOST/imposter-words:$GITHUB_SHA" \
+            --output none
+
+          az containerapp update \
+            --resource-group "$RESOURCE_GROUP" \
+            --name imposter-game \
+            --image "$REGISTRY_HOST/imposter-game:$GITHUB_SHA" \
+            --output none
   build-and-test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
