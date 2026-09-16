@@ -1,5 +1,9 @@
 import type { Session } from './types';
 
+const apiBaseUrl = (
+  import.meta.env.VITE_API_BASE_URL || '/api'
+).replace(/\/$/, '');
+
 export class ApiError extends Error {
   constructor(message: string, public readonly status: number) {
     super(message);
@@ -8,7 +12,7 @@ export class ApiError extends Error {
 }
 
 export async function request<T>(path: string, options: RequestInit = {}, session?: Session): Promise<T> {
-  const response = await fetch(`/api${path}`, {
+  const response = await fetch(`${apiBaseUrl}${path}`, {
     ...options,
     signal: options.signal
       ? AbortSignal.any([options.signal, AbortSignal.timeout(120_000)])

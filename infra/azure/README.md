@@ -87,3 +87,23 @@ Scale down follows the platform's idle interval, rather than happening immediate
 5. Check idle database activity. Recurring SQL must not come from API timers, health monitors, or pool keepalive settings.
 
 Settings were checked against Microsoft's documentation. Cloud scale-down verification requires a deployed Azure environment and has not been performed here.
+
+## React on Azure Static Web Apps Free
+
+The frontend supports VITE_API_BASE_URL at build time, with /api as the local default.
+
+1. Create a Static Web App linked to this GitHub repository and main branch. Use app location src/imposter-web, no API location, and output location dist.
+2. In GitHub repository Settings > Secrets and variables > Actions > Variables, add VITE_API_BASE_URL with https://YOUR-GAME-APP.azurecontainerapps.io/api. This is a public URL, not a secret.
+3. In the generated Static Web Apps workflow, add the following env mapping to the Azure/static-web-apps-deploy step that builds and uploads the app:
+
+```yaml
+env:
+  VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
+```
+
+The env mapping belongs beside uses and with, not inside with. Keep the generated deployment token reference. If the workflow builds separately with npm run build and uses skip_app_build, put this env mapping on the build step instead. Use Node.js 22 for a separate build. Updating only the Static Web App runtime settings does not rebuild the JavaScript bundle.
+
+4. On the Game Container App, set Frontend__Origin to the exact Static Web App origin, for example https://YOUR-SITE.azurestaticapps.net (no path). Redeploy the Game image containing this CORS configuration and create a revision with that variable. It allows browser requests only from the configured origin. Leaving it unset preserves same-origin local access and grants no cross-origin access.
+5. Rebuild and deploy the frontend after changing VITE_API_BASE_URL. Verify creating a lobby, joining from a second browser, and starting a game. Browser network requests should target the Game host at /api/lobbies. The Words URL and service API key belong only in the Game backend configuration.
+
+Do not put database passwords or Services__ApiKey in any VITE_ variable; these variables are embedded in the public JavaScript bundle.

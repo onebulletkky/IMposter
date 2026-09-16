@@ -8,6 +8,12 @@ using Microsoft.AspNetCore.RateLimiting;
 using Npgsql;
 
 var builder = WebApplication.CreateBuilder(args);
+var frontendOrigin = builder.Configuration["Frontend:Origin"]?.TrimEnd('/');
+builder.Services.AddCors(options => options.AddPolicy("Frontend", policy =>
+{
+    if (!string.IsNullOrWhiteSpace(frontendOrigin))
+        policy.WithOrigins(frontendOrigin).AllowAnyHeader().AllowAnyMethod();
+}));
 builder.Services.ConfigureHttpJsonOptions(o => o.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 builder.Services.AddMediatR(c => c.RegisterServicesFromAssemblyContaining<CreateLobby>());
 builder.Services.AddSingleton(TimeProvider.System);
@@ -58,6 +64,7 @@ app.Use(async (context, next) =>
         await Results.Problem("An unexpected error occurred. Please try again.", statusCode: 500).ExecuteAsync(context);
     }
 });
+app.UseCors("Frontend");
 app.UseRateLimiter();
 app.MapGet("/health/live", () => Results.Ok(new { status = "healthy" }));
 app.MapGet("/health/ready", async (NpgsqlDataSource db, CancellationToken ct) =>

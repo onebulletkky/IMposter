@@ -71,3 +71,18 @@ describe('Cold-start requests', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
+
+it('uses the configured backend URL and removes its trailing slash', async () => {
+  vi.stubEnv('VITE_API_BASE_URL', 'https://game.example.com/api/');
+  vi.resetModules();
+  try {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const configured = await import('./api');
+    await configured.request('/lobbies');
+    expect(fetchMock).toHaveBeenCalledWith('https://game.example.com/api/lobbies', expect.any(Object));
+  } finally {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  }
+});
